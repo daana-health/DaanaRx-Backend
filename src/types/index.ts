@@ -128,6 +128,8 @@ export interface Invitation {
   createdAt: Date;
   expiresAt: Date;
   acceptedAt?: Date;
+  clinic?: Clinic;
+  invitedByUser?: User;
 }
 
 // Feedback types

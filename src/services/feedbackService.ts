@@ -1,5 +1,5 @@
 import { supabaseServer } from '../utils/supabase';
-import { Feedback, CreateFeedbackRequest } from '../types';
+import { Feedback } from '../types';
 
 /**
  * Create new feedback
