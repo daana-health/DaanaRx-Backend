@@ -24,9 +24,24 @@ export interface FEFOCheckoutRequest {
   strength?: number;
   strengthUnit?: string;
   quantity: number;
-  patientName?: string;
-  patientReferenceId?: string;
   notes?: string;
+}
+
+/**
+ * Batch Checkout Item
+ */
+export interface BatchCheckOutItem {
+  unitId: string;
+  quantity: number;
+}
+
+/**
+ * Batch Checkout Result
+ */
+export interface BatchCheckOutResult {
+  transactions: Transaction[];
+  totalItems: number;
+  totalQuantity: number;
 }
 
 /**
@@ -166,8 +181,6 @@ export async function checkOutMedicationFEFO(
         type: 'check_out',
         quantity: quantityToTake,
         unit_id: unit.unit_id,
-        patient_name: input.patientName,
-        patient_reference_id: input.patientReferenceId,
         user_id: userId,
         notes: input.notes || `FEFO checkout - Unit ${unitsUsed.length + 1} of batch`,
         clinic_id: clinicId,
@@ -294,8 +307,6 @@ export async function checkOutUnit(
       type: 'check_out',
       quantity: input.quantity,
       unit_id: input.unitId,
-      patient_name: input.patientName,
-      patient_reference_id: input.patientReferenceId,
       user_id: userId,
       notes: input.notes,
       clinic_id: clinicId,
@@ -407,6 +418,76 @@ export async function getTransactions(
   return {
     transactions: filteredTransactions.map(formatTransaction),
     total: search ? filteredTransactions.length : (count || 0),
+    page,
+    pageSize,
+  };
+}
+
+/**
+ * Get all transactions with filters for logs page
+ */
+export async function getAllTransactions(
+  clinicId: string,
+  page: number = 1,
+  pageSize: number = 20,
+  type?: string,
+  startDate?: string,
+  endDate?: string,
+  medicationName?: string
+) {
+  let query = supabaseServer
+    .from('transactions')
+    .select(`
+      *,
+      unit:units!transactions_unit_id_fkey(*, drug:drugs(*)),
+      user:users(*)
+    `, { count: 'exact' })
+    .eq('clinic_id', clinicId);
+
+  // Filter by transaction type
+  if (type) {
+    query = query.eq('type', type);
+  }
+
+  // Filter by date range
+  if (startDate) {
+    query = query.gte('timestamp', startDate);
+  }
+  if (endDate) {
+    // Add one day to include the entire end date
+    const endDateTime = new Date(endDate);
+    endDateTime.setDate(endDateTime.getDate() + 1);
+    query = query.lt('timestamp', endDateTime.toISOString());
+  }
+
+  // Pagination
+  const from = (page - 1) * pageSize;
+  const to = from + pageSize - 1;
+  query = query.range(from, to).order('timestamp', { ascending: false });
+
+  const { data: transactions, error, count } = await query;
+
+  if (error) {
+    throw new Error(`Failed to get transactions: ${error.message}`);
+  }
+
+  // Filter by medication name (client-side since it's a joined field)
+  let filteredTransactions = transactions || [];
+  if (medicationName && filteredTransactions.length > 0) {
+    const searchLower = medicationName.toLowerCase();
+    filteredTransactions = filteredTransactions.filter((tx: any) => {
+      return (
+        (tx.unit && tx.unit.drug && tx.unit.drug.medication_name &&
+          tx.unit.drug.medication_name.toLowerCase().includes(searchLower)) ||
+        (tx.unit && tx.unit.drug && tx.unit.drug.generic_name &&
+          tx.unit.drug.generic_name.toLowerCase().includes(searchLower))
+      );
+    });
+  }
+
+  return {
+    transactions: filteredTransactions.map(formatTransaction),
+    total: medicationName ? filteredTransactions.length : (count || 0),
     page,
     pageSize,
   };
@@ -559,4 +640,123 @@ function formatTransaction(transaction: any): any {
   }
 
   return formatted;
+}
+
+/**
+ * Batch check out multiple units (cart checkout)
+ * Processes all items in a single operation with rollback on failure
+ */
+export async function batchCheckOutUnits(
+  items: BatchCheckOutItem[],
+  userId: string,
+  clinicId: string,
+  notes?: string
+): Promise<BatchCheckOutResult> {
+  if (!items || items.length === 0) {
+    throw new Error('No items to checkout');
+  }
+
+  if (items.length > 50) {
+    throw new Error('Cannot checkout more than 50 items at once');
+  }
+
+  const transactions: Transaction[] = [];
+  const completedItems: Array<{ unitId: string; originalQuantity: number }> = [];
+  let totalQuantity = 0;
+
+  try {
+    for (const item of items) {
+      // Get the unit
+      const { data: unit, error: unitError } = await supabaseServer
+        .from('units')
+        .select('*')
+        .eq('unit_id', item.unitId)
+        .eq('clinic_id', clinicId)
+        .single();
+
+      if (unitError || !unit) {
+        throw new Error(`Unit not found: ${item.unitId}`);
+      }
+
+      // Validate quantity
+      if (unit.available_quantity < item.quantity) {
+        throw new Error(
+          `Insufficient quantity for unit ${item.unitId}. Available: ${unit.available_quantity}, Requested: ${item.quantity}`
+        );
+      }
+
+      // Store original quantity for rollback
+      completedItems.push({
+        unitId: item.unitId,
+        originalQuantity: unit.available_quantity,
+      });
+
+      // Update unit quantity
+      const newAvailableQuantity = unit.available_quantity - item.quantity;
+      const { error: updateError } = await supabaseServer
+        .from('units')
+        .update({ available_quantity: newAvailableQuantity })
+        .eq('unit_id', item.unitId)
+        .eq('clinic_id', clinicId);
+
+      if (updateError) {
+        throw new Error(`Failed to update unit ${item.unitId}: ${updateError.message}`);
+      }
+
+      // Create transaction
+      const { data: transaction, error: transactionError } = await supabaseServer
+        .from('transactions')
+        .insert({
+          type: 'check_out',
+          quantity: item.quantity,
+          unit_id: item.unitId,
+          user_id: userId,
+          notes: notes || `Batch checkout (${transactions.length + 1}/${items.length})`,
+          clinic_id: clinicId,
+        })
+        .select('*')
+        .single();
+
+      if (transactionError || !transaction) {
+        throw new Error(`Failed to create transaction for unit ${item.unitId}: ${transactionError?.message}`);
+      }
+
+      // Fetch complete transaction with joins
+      const { data: completeTransaction } = await supabaseServer
+        .from('transactions')
+        .select(`
+          *,
+          unit:units!transactions_unit_id_fkey(*, drug:drugs(*)),
+          user:users(*)
+        `)
+        .eq('transaction_id', transaction.transaction_id)
+        .single();
+
+      transactions.push(formatTransaction(completeTransaction || transaction));
+      totalQuantity += item.quantity;
+    }
+
+    return {
+      transactions,
+      totalItems: items.length,
+      totalQuantity,
+    };
+  } catch (error: any) {
+    // Rollback all completed updates
+    console.error('[TransactionService] Batch checkout failed, rolling back:', error.message);
+
+    for (const completed of completedItems) {
+      try {
+        await supabaseServer
+          .from('units')
+          .update({ available_quantity: completed.originalQuantity })
+          .eq('unit_id', completed.unitId)
+          .eq('clinic_id', clinicId);
+      } catch (rollbackError: any) {
+        console.error(`[TransactionService] Rollback failed for unit ${completed.unitId}:`, rollbackError.message);
+      }
+    }
+
+    throw error;
+  }
 }

@@ -168,9 +168,10 @@ export async function deleteLocation(locationId: string, clinicId: string): Prom
  * Create a new lot
  */
 export async function createLot(
-  source: string,
   locationId: string,
   clinicId: string,
+  lotCode: string,
+  source?: string,
   note?: string,
   maxCapacity?: number
 ): Promise<Lot> {
@@ -178,6 +179,23 @@ export async function createLot(
   const location = await getLocationById(locationId, clinicId);
   if (!location) {
     throw new Error('Location not found or does not belong to your clinic');
+  }
+
+  // Validate lotCode format (1-2 uppercase letters)
+  if (!lotCode || lotCode.length < 1 || lotCode.length > 2) {
+    throw new Error('Lot code must be 1-2 characters (e.g., "A", "AL", "CR")');
+  }
+
+  const normalizedLotCode = lotCode.toUpperCase();
+
+  // Validate first character is A-Z
+  if (!/^[A-Z]/.test(normalizedLotCode)) {
+    throw new Error('Lot code must start with a letter (A-Z)');
+  }
+
+  // If second character exists, validate it's L or R
+  if (normalizedLotCode.length === 2 && !/^[A-Z][LR]$/.test(normalizedLotCode)) {
+    throw new Error('Second character of lot code must be L (Left) or R (Right)');
   }
 
   // Validate maxCapacity if provided
@@ -188,7 +206,8 @@ export async function createLot(
   const { data: lot, error } = await supabaseServer
     .from('lots')
     .insert({
-      source,
+      source: source || null,
+      lot_code: normalizedLotCode,
       location_id: locationId,
       clinic_id: clinicId,
       note,
@@ -298,7 +317,8 @@ function formatLocation(location: any): Location {
 function formatLot(lot: any): Lot {
   return {
     lotId: lot.lot_id,
-    source: lot.source,
+    source: lot.source || undefined,
+    lotCode: lot.lot_code || undefined,
     note: lot.note,
     dateCreated: new Date(lot.date_created),
     locationId: lot.location_id,

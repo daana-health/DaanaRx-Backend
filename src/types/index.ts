@@ -19,6 +19,7 @@ export interface Clinic {
   logoUrl?: string;
   userRole?: string;
   joinedAt?: Date;
+  requireLotLocation?: boolean;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -54,7 +55,8 @@ export interface Location {
 
 export interface Lot {
   lotId: string;
-  source: string;
+  source?: string;
+  lotCode?: string;
   note?: string;
   dateCreated: Date;
   locationId: string;
@@ -69,10 +71,10 @@ export interface Lot {
 export interface Drug {
   drugId: string;
   medicationName: string;
-  genericName: string;
+  genericName?: string;
   strength: number;
   strengthUnit: string;
-  ndcId: string;
+  ndcId?: string;
   form: string;
 }
 
@@ -157,10 +159,10 @@ export interface CreateUnitRequest {
   drugId?: string;
   drugData?: {
     medicationName: string;
-    genericName: string;
+    genericName?: string;
     strength: number;
     strengthUnit: string;
-    ndcId: string;
+    ndcId?: string;
     form: string;
   };
   patientReferenceId?: string;
@@ -172,8 +174,31 @@ export interface CreateUnitRequest {
 export interface CheckOutRequest {
   unitId: string;
   quantity: number;
-  patientName?: string;
-  patientReferenceId?: string;
   notes?: string;
+}
+
+// Batch Check-in Request
+export interface BatchCheckInRequest {
+  lotId: string;
+  medicationName: string;
+  dosage: string;
+  quantity: number;
+  expiryDate?: Date | string;
+  manufacturerLotNumber?: string;
+}
+
+// Batch Check-out Request
+export interface BatchCheckOutItem {
+  unitId: string;
+  quantity: number;
+}
+
+// Create Lot Request
+export interface CreateLotRequest {
+  source?: string;
+  lotCode: string;
+  note?: string;
+  locationId: string;
+  maxCapacity?: number;
 }
 

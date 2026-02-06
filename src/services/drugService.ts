@@ -187,9 +187,16 @@ export async function searchDrugByNDC(
  * Get or create drug in database
  */
 export async function getOrCreateDrug(
-  drugData: Omit<DrugSearchResult, 'drugId' | 'inInventory'>
+  drugData: {
+    medicationName: string;
+    genericName?: string | null;
+    strength: number;
+    strengthUnit: string;
+    ndcId?: string | null;
+    form: string;
+  }
 ): Promise<string> {
-  // Check if drug exists by NDC
+  // Check if drug exists by NDC (if provided)
   if (drugData.ndcId) {
     const { data: existingDrug } = await supabaseServer
       .from('drugs')
@@ -203,10 +210,11 @@ export async function getOrCreateDrug(
   }
 
   // Check if similar drug exists by name and strength
+  const genericName = drugData.genericName || drugData.medicationName;
   const { data: similarDrug } = await supabaseServer
     .from('drugs')
     .select('drug_id')
-    .eq('generic_name', drugData.genericName)
+    .ilike('medication_name', drugData.medicationName)
     .eq('strength', drugData.strength)
     .eq('strength_unit', drugData.strengthUnit)
     .eq('form', drugData.form)
@@ -216,15 +224,15 @@ export async function getOrCreateDrug(
     return similarDrug.drug_id;
   }
 
-  // Create new drug
+  // Create new drug (NDC is now optional)
   const { data: newDrug, error } = await supabaseServer
     .from('drugs')
     .insert({
       medication_name: drugData.medicationName,
-      generic_name: drugData.genericName,
+      generic_name: genericName,
       strength: drugData.strength,
       strength_unit: drugData.strengthUnit,
-      ndc_id: drugData.ndcId || `MANUAL-${Date.now()}`,
+      ndc_id: drugData.ndcId || null, // NDC is optional now
       form: drugData.form,
     })
     .select('drug_id')
@@ -235,4 +243,110 @@ export async function getOrCreateDrug(
   }
 
   return newDrug.drug_id;
+}
+
+/**
+ * Search medications by name only (not NDC)
+ * Returns deduplicated list of medication names with their details
+ * Prioritizes clinic inventory, then drugs database
+ */
+export async function searchMedicationsByName(
+  query: string,
+  clinicId: string
+): Promise<DrugSearchResult[]> {
+  if (!query || query.trim().length < 2) {
+    return [];
+  }
+
+  const normalizedQuery = query.trim().toLowerCase();
+  const results: DrugSearchResult[] = [];
+  const seenMedications = new Set<string>(); // Key: medicationName+strength+strengthUnit
+
+  // First: Search clinic's inventory (units with drugs)
+  const { data: inventoryDrugs } = await supabaseServer
+    .from('units')
+    .select(
+      `
+      unit_id,
+      drug:drugs (
+        drug_id,
+        medication_name,
+        generic_name,
+        strength,
+        strength_unit,
+        ndc_id,
+        form
+      )
+    `
+    )
+    .eq('clinic_id', clinicId)
+    .gt('available_quantity', 0);
+
+  if (inventoryDrugs) {
+    for (const unit of inventoryDrugs) {
+      if (!unit.drug) continue;
+
+      const drug = unit.drug as any;
+      const nameMatch =
+        drug.medication_name.toLowerCase().includes(normalizedQuery) ||
+        (drug.generic_name && drug.generic_name.toLowerCase().includes(normalizedQuery));
+
+      if (nameMatch) {
+        // Create key for deduplication (by name+strength+unit, NOT by NDC)
+        const key = `${drug.medication_name.toLowerCase()}-${drug.strength}-${drug.strength_unit}`;
+
+        if (!seenMedications.has(key)) {
+          seenMedications.add(key);
+          results.push({
+            drugId: drug.drug_id,
+            medicationName: drug.medication_name,
+            genericName: drug.generic_name,
+            strength: drug.strength,
+            strengthUnit: drug.strength_unit,
+            ndcId: drug.ndc_id,
+            form: drug.form,
+            inInventory: true,
+          });
+        }
+      }
+    }
+  }
+
+  // Second: Search drugs database by name only
+  const { data: allDrugs } = await supabaseServer
+    .from('drugs')
+    .select('*')
+    .or(
+      `medication_name.ilike.%${normalizedQuery}%,generic_name.ilike.%${normalizedQuery}%`
+    )
+    .limit(30);
+
+  if (allDrugs) {
+    for (const drug of allDrugs) {
+      const key = `${drug.medication_name.toLowerCase()}-${drug.strength}-${drug.strength_unit}`;
+
+      if (!seenMedications.has(key)) {
+        seenMedications.add(key);
+        results.push({
+          drugId: drug.drug_id,
+          medicationName: drug.medication_name,
+          genericName: drug.generic_name,
+          strength: drug.strength,
+          strengthUnit: drug.strength_unit,
+          ndcId: drug.ndc_id,
+          form: drug.form,
+          inInventory: false,
+        });
+      }
+    }
+  }
+
+  // Sort: inventory items first, then by name
+  results.sort((a, b) => {
+    if (a.inInventory && !b.inInventory) return -1;
+    if (!a.inInventory && b.inInventory) return 1;
+    return a.medicationName.localeCompare(b.medicationName);
+  });
+
+  return results.slice(0, 15); // Return top 15 results
 }

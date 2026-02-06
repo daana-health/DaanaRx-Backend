@@ -20,6 +20,7 @@ export const typeDefs = `#graphql
     logoUrl: String
     userRole: UserRole
     joinedAt: DateTime
+    requireLotLocation: Boolean
     createdAt: DateTime!
     updatedAt: DateTime!
   }
@@ -56,7 +57,8 @@ export const typeDefs = `#graphql
 
   type Lot {
     lotId: ID!
-    source: String!
+    source: String
+    lotCode: String
     note: String
     dateCreated: DateTime!
     locationId: ID!
@@ -70,10 +72,10 @@ export const typeDefs = `#graphql
   type Drug {
     drugId: ID!
     medicationName: String!
-    genericName: String!
+    genericName: String
     strength: Float!
     strengthUnit: String!
-    ndcId: String!
+    ndcId: String
     form: String!
     inInventory: Boolean
   }
@@ -129,10 +131,10 @@ export const typeDefs = `#graphql
   type DrugSearchResult {
     drugId: ID
     medicationName: String!
-    genericName: String!
+    genericName: String
     strength: Float!
     strengthUnit: String!
-    ndcId: String!
+    ndcId: String
     form: String!
     inInventory: Boolean
   }
@@ -229,7 +231,8 @@ export const typeDefs = `#graphql
   }
 
   input CreateLotInput {
-    source: String!
+    source: String
+    lotCode: String!
     note: String
     locationId: ID!
     maxCapacity: Int
@@ -237,10 +240,10 @@ export const typeDefs = `#graphql
 
   input DrugInput {
     medicationName: String!
-    genericName: String!
+    genericName: String
     strength: Float!
     strengthUnit: String!
-    ndcId: String!
+    ndcId: String
     form: String!
   }
 
@@ -258,8 +261,6 @@ export const typeDefs = `#graphql
   input CheckOutInput {
     unitId: ID!
     quantity: Int!
-    patientName: String
-    patientReferenceId: String
     notes: String
   }
 
@@ -269,8 +270,6 @@ export const typeDefs = `#graphql
     strength: Float
     strengthUnit: String
     quantity: Int!
-    patientName: String
-    patientReferenceId: String
     notes: String
   }
 
@@ -329,6 +328,26 @@ export const typeDefs = `#graphql
     ndcId: String
     sortBy: UnitSortField
     sortOrder: SortOrder
+  }
+
+  input BatchCheckInInput {
+    lotId: ID!
+    medicationName: String!
+    dosage: String!
+    quantity: Int!
+    expiryDate: Date
+    manufacturerLotNumber: String
+  }
+
+  input BatchCheckOutItem {
+    unitId: ID!
+    quantity: Int!
+  }
+
+  type BatchCheckOutResult {
+    transactions: [Transaction!]!
+    totalItems: Int!
+    totalQuantity: Int!
   }
 
   type MedicationExpiring {
@@ -394,6 +413,7 @@ export const typeDefs = `#graphql
     searchDrugs(query: String!): [DrugSearchResult!]!
     searchDrugByNDC(ndc: String!): DrugSearchResult
     getDrug(drugId: ID!): Drug
+    searchMedicationsByName(query: String!): [DrugSearchResult!]!
 
     # Units
     getUnits(page: Int, pageSize: Int, search: String, clinicId: ID): PaginatedUnits!
@@ -409,6 +429,7 @@ export const typeDefs = `#graphql
     # Transactions
     getTransactions(page: Int, pageSize: Int, search: String, unitId: ID, clinicId: ID): PaginatedTransactions!
     getTransaction(transactionId: ID!, clinicId: ID): Transaction
+    getAllTransactions(page: Int, pageSize: Int, type: String, startDate: Date, endDate: Date, medicationName: String): PaginatedTransactions!
 
     # Users
     getUsers: [User!]!
@@ -445,16 +466,18 @@ export const typeDefs = `#graphql
     # Units
     createUnit(input: CreateUnitInput!): Unit!
     updateUnit(input: UpdateUnitInput!): Unit!
+    batchCreateUnits(input: BatchCheckInInput!): [Unit!]!
 
     # Check-out
     checkOutUnit(input: CheckOutInput!): Transaction!
     checkOutMedicationFEFO(input: FEFOCheckOutInput!): FEFOCheckOutResult!
+    batchCheckOutUnits(items: [BatchCheckOutItem!]!, notes: String): BatchCheckOutResult!
 
     # Transactions
     updateTransaction(input: UpdateTransactionInput!): Transaction!
 
     # Clinic
-    updateClinic(name: String, primaryColor: String, secondaryColor: String): Clinic!
+    updateClinic(name: String, primaryColor: String, secondaryColor: String, requireLotLocation: Boolean): Clinic!
     createClinic(input: CreateClinicInput!): AuthPayload!
     deleteClinic(clinicId: ID!): Boolean!
     switchClinic(clinicId: ID!): AuthPayload!

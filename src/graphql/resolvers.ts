@@ -118,6 +118,15 @@ export const resolvers = {
       return drugService.searchDrugByNDC(ndc, clinic.clinicId);
     },
 
+    searchMedicationsByName: async (
+      _: unknown,
+      { query }: { query: string },
+      context: GraphQLContext
+    ) => {
+      const { clinic } = requireAuth(context);
+      return drugService.searchMedicationsByName(query, clinic.clinicId);
+    },
+
     getDrug: async (_: unknown, { drugId }: { drugId: string }) => {
       if (!drugId) {
         throw new GraphQLError('Drug id is required', {
@@ -328,6 +337,37 @@ export const resolvers = {
       return transactionService.getTransactionById(transactionId, requestedClinicId);
     },
 
+    getAllTransactions: async (
+      _: unknown,
+      {
+        page,
+        pageSize,
+        type,
+        startDate,
+        endDate,
+        medicationName,
+      }: {
+        page?: number;
+        pageSize?: number;
+        type?: string;
+        startDate?: string;
+        endDate?: string;
+        medicationName?: string;
+      },
+      context: GraphQLContext
+    ) => {
+      const { clinic } = requireAuth(context);
+      return transactionService.getAllTransactions(
+        clinic.clinicId,
+        page || 1,
+        pageSize || 20,
+        type,
+        startDate,
+        endDate,
+        medicationName
+      );
+    },
+
     // Users
     getUsers: async (_: unknown, __: unknown, context: GraphQLContext) => {
       requireRole(context, ['superadmin', 'admin']);
@@ -501,11 +541,11 @@ export const resolvers = {
     // Lots
     createLot: async (
       _: unknown,
-      { input }: { input: { source: string; note?: string; locationId: string; maxCapacity?: number } },
+      { input }: { input: { source?: string; lotCode: string; note?: string; locationId: string; maxCapacity?: number } },
       context: GraphQLContext
     ) => {
       const { clinic } = requireAuth(context);
-      return locationService.createLot(input.source, input.locationId, clinic.clinicId, input.note, input.maxCapacity);
+      return locationService.createLot(input.locationId, clinic.clinicId, input.lotCode, input.source, input.note, input.maxCapacity);
     },
 
     // Units
@@ -520,6 +560,11 @@ export const resolvers = {
       return unitService.updateUnit(input.unitId, input, clinic.clinicId);
     },
 
+    batchCreateUnits: async (_: unknown, { input }: { input: any }, context: GraphQLContext) => {
+      const { user, clinic } = requireAuth(context);
+      return unitService.batchCreateUnits(input, user.userId, clinic.clinicId);
+    },
+
     // Check-out
     checkOutUnit: async (_: unknown, { input }: { input: any }, context: GraphQLContext) => {
       const { user, clinic } = requireAuth(context);
@@ -529,6 +574,15 @@ export const resolvers = {
     checkOutMedicationFEFO: async (_: unknown, { input }: { input: any }, context: GraphQLContext) => {
       const { user, clinic } = requireAuth(context);
       return transactionService.checkOutMedicationFEFO(input, user.userId, clinic.clinicId);
+    },
+
+    batchCheckOutUnits: async (
+      _: unknown,
+      { items, notes }: { items: Array<{ unitId: string; quantity: number }>; notes?: string },
+      context: GraphQLContext
+    ) => {
+      const { user, clinic } = requireAuth(context);
+      return transactionService.batchCheckOutUnits(items, user.userId, clinic.clinicId, notes);
     },
 
     // Transactions
@@ -541,16 +595,17 @@ export const resolvers = {
     // Clinic
     updateClinic: async (
       _: unknown,
-      { name, primaryColor, secondaryColor }: { name?: string; primaryColor?: string; secondaryColor?: string },
+      { name, primaryColor, secondaryColor, requireLotLocation }: { name?: string; primaryColor?: string; secondaryColor?: string; requireLotLocation?: boolean },
       context: GraphQLContext
     ) => {
       requireRole(context, ['superadmin']);
       const { clinic } = requireAuth(context);
 
       const updates: Record<string, unknown> = {};
-      if (name) updates.name = name;
-      if (primaryColor) updates.primary_color = primaryColor;
-      if (secondaryColor) updates.secondary_color = secondaryColor;
+      if (name !== undefined) updates.name = name;
+      if (primaryColor !== undefined) updates.primary_color = primaryColor;
+      if (secondaryColor !== undefined) updates.secondary_color = secondaryColor;
+      if (requireLotLocation !== undefined) updates.require_lot_location = requireLotLocation;
 
       const { data: updatedClinic, error } = await supabaseServer
         .from('clinics')
@@ -569,6 +624,7 @@ export const resolvers = {
         primaryColor: updatedClinic.primary_color,
         secondaryColor: updatedClinic.secondary_color,
         logoUrl: updatedClinic.logo_url,
+        requireLotLocation: updatedClinic.require_lot_location,
         createdAt: new Date(updatedClinic.created_at),
         updatedAt: new Date(updatedClinic.updated_at),
       };

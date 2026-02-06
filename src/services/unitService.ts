@@ -1,7 +1,8 @@
 import { supabaseServer } from '../utils/supabase';
-import { Unit, CreateUnitRequest } from '../types';
+import { Unit, CreateUnitRequest, BatchCheckInRequest } from '../types';
 import { getOrCreateDrug } from './drugService';
 import { getLotById, getLotCurrentCapacity } from './locationService';
+import { generateQRCode, parseDosage } from '../utils/qrCode';
 
 /**
  * Create a new unit
@@ -405,7 +406,8 @@ function formatUnit(unit: any): Unit {
     },
     lot: {
       lotId: unit.lot.lot_id,
-      source: unit.lot.source,
+      source: unit.lot.source || undefined,
+      lotCode: unit.lot.lot_code || undefined,
       note: unit.lot.note,
       dateCreated: new Date(unit.lot.date_created),
       locationId: unit.lot.location_id,
@@ -847,4 +849,153 @@ export async function getInventoryByLocation(locationId: string, clinicId: strin
   const filteredUnits = units?.filter((unit: any) => unit.lot?.location_id === locationId) || [];
 
   return filteredUnits.map(formatUnit);
+}
+
+/**
+ * Batch create units - creates N separate unit entries
+ * Each unit gets its own QR code in the format: {LotCode}-{MMDDYY}-{4LetterMed}-{Dosage}-{Sequence}
+ */
+export async function batchCreateUnits(
+  input: BatchCheckInRequest,
+  userId: string,
+  clinicId: string
+): Promise<Unit[]> {
+  console.log('[UnitService] Batch creating units with input:', {
+    lotId: input.lotId,
+    medicationName: input.medicationName,
+    dosage: input.dosage,
+    quantity: input.quantity,
+    expiryDate: input.expiryDate,
+    manufacturerLotNumber: input.manufacturerLotNumber,
+    userId,
+    clinicId,
+  });
+
+  // Validate quantity
+  if (input.quantity < 1 || input.quantity > 100) {
+    throw new Error('Quantity must be between 1 and 100');
+  }
+
+  // Get lot and validate
+  const lot = await getLotById(input.lotId, clinicId);
+  if (!lot) {
+    throw new Error('Lot not found');
+  }
+
+  // Check lot capacity if max_capacity is set
+  if (lot.maxCapacity !== undefined && lot.maxCapacity !== null) {
+    const currentCapacity = await getLotCurrentCapacity(input.lotId);
+    const newTotalCapacity = currentCapacity + input.quantity;
+
+    if (newTotalCapacity > lot.maxCapacity) {
+      throw new Error(
+        `Cannot add ${input.quantity} units: Would exceed lot capacity. ` +
+        `Current: ${currentCapacity}/${lot.maxCapacity}, ` +
+        `Available: ${lot.maxCapacity - currentCapacity}`
+      );
+    }
+  }
+
+  // Parse dosage to get strength and unit
+  const { strength, strengthUnit } = parseDosage(input.dosage);
+
+  // Create or get the drug
+  const drugId = await getOrCreateDrug({
+    medicationName: input.medicationName,
+    genericName: input.medicationName, // Use medication name as generic if not provided
+    strength,
+    strengthUnit,
+    ndcId: null, // NDC is optional now
+    form: 'Tablet', // Default form
+  });
+
+  if (!drugId) {
+    throw new Error('Failed to create or find drug');
+  }
+
+  // Get lot code for QR generation
+  const lotCode = lot.lotCode || 'XX';
+  const today = new Date();
+
+  // Create units in batch
+  const createdUnits: Unit[] = [];
+  const errors: string[] = [];
+
+  for (let i = 1; i <= input.quantity; i++) {
+    try {
+      // Generate unique QR code for this unit
+      const qrCode = generateQRCode(lotCode, today, input.medicationName, input.dosage, i);
+
+      // Create the unit
+      const { data: unit, error } = await supabaseServer
+        .from('units')
+        .insert({
+          total_quantity: 1, // Each unit represents 1 item
+          available_quantity: 1,
+          lot_id: input.lotId,
+          expiry_date: input.expiryDate || null,
+          user_id: userId,
+          drug_id: drugId,
+          qr_code: qrCode,
+          optional_notes: null,
+          manufacturer_lot_number: input.manufacturerLotNumber || null,
+          clinic_id: clinicId,
+        })
+        .select('*')
+        .single();
+
+      if (error || !unit) {
+        errors.push(`Unit ${i}: ${error?.message || 'Unknown error'}`);
+        continue;
+      }
+
+      // Create check-in transaction
+      await supabaseServer
+        .from('transactions')
+        .insert({
+          type: 'check_in',
+          quantity: 1,
+          unit_id: unit.unit_id,
+          user_id: userId,
+          notes: `Batch check-in (${i}/${input.quantity})`,
+          clinic_id: clinicId,
+        });
+
+      // Fetch complete unit with relations
+      const { data: completeUnit } = await supabaseServer
+        .from('units')
+        .select(`
+          *,
+          drug:drugs(*),
+          lot:lots!units_lot_id_fkey(*),
+          user:users(*)
+        `)
+        .eq('unit_id', unit.unit_id)
+        .single();
+
+      if (completeUnit) {
+        createdUnits.push(formatUnit(completeUnit));
+      }
+    } catch (err: any) {
+      errors.push(`Unit ${i}: ${err.message}`);
+    }
+  }
+
+  // If all units failed, throw error
+  if (createdUnits.length === 0 && errors.length > 0) {
+    throw new Error(`Failed to create any units: ${errors.join('; ')}`);
+  }
+
+  // Log any partial failures
+  if (errors.length > 0) {
+    console.warn('[UnitService] Some units failed to create:', errors);
+  }
+
+  console.log('[UnitService] Batch create completed:', {
+    requested: input.quantity,
+    created: createdUnits.length,
+    failed: errors.length,
+  });
+
+  return createdUnits;
 }
